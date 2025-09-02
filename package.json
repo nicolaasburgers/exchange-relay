@@ -1,0 +1,5 @@
+{
+  "name": "exchange-relay-monorepo",
+  "private": true,
+  "workspaces": ["apps/*", "packages/*"]
+}
