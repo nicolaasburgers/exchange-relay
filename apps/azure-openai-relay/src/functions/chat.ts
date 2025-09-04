@@ -22,7 +22,7 @@ const AOAI_API_KEY      = (process.env.AOAI_API_KEY || "").trim();
 const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS || 60000); // optional but sensible
 
 app.http("chat", {
-  route: "chat",
+  route: "v1/chat",
   methods: ["POST", "OPTIONS"],
   authLevel: "anonymous",
   handler: async (req: HttpRequest): Promise<HttpResponseInit> => {

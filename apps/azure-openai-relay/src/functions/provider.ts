@@ -6,7 +6,7 @@ const PROVIDER_NAME = "Azure OpenAI Relay";
 const PROVIDER_VERSION = "1";   // bump with releases
 
 app.http("provider", {
-  route: "provider",
+  route: "v1/provider",
   methods: ["GET","OPTIONS"],
   authLevel: "anonymous",
   handler: async (req: HttpRequest, _ctx: InvocationContext): Promise<HttpResponseInit> => {
