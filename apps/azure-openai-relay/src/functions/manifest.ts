@@ -35,7 +35,7 @@ function parseModelMap(raw: string | undefined): ManifestDeployment[] {
 }
 
 app.http("manifest", {
-  route: "v1/manifest",
+  route: "kea/v1/manifest",
   methods: ["GET", "OPTIONS"],
   authLevel: "anonymous",
   handler: async (req: HttpRequest): Promise<HttpResponseInit> => {
