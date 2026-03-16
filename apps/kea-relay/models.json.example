@@ -1,0 +1,18 @@
+{
+  "providerId": "aws_bedrock",
+  "name": "AWS Bedrock Relay",
+  "version": "1",
+  "deployments": [
+    {
+      "displayName": "Claude Sonnet 4.5 (Approved)",
+      "deploymentName": "claude-sonnet-4-5",
+      "provider": "aws_bedrock",
+      "bedrockModelId": "global.anthropic.claude-sonnet-4-5-20250929-v1:0",
+      "inferenceProfileArn": null,
+      "maxTokens": 4096,
+      "temperature": null,
+      "topP": null,
+      "stopSequences": []
+    }
+  ]
+}

@@ -1,12 +1,15 @@
-# Exchange Relay (Azure OpenAI) — for Kea (Grasshopper)
+# Kea Relay
+
+This repository contains a single relay app:
+
+- `apps/kea-relay` — containerized Express service, AWS Bedrock provider
 
 A minimal, open-source **relay** designed for **Kea** running inside **Grasshopper (Rhino)**.  
-The relay runs in your organization’s Azure tenancy and forwards requests to **Azure OpenAI** using **server-side secrets**. Clients (Kea inside Grasshopper) do **not** carry or transmit API keys.
+The relay runs inside your organization environment and forwards requests to approved models using server-side AWS credentials or runtime IAM identity. Clients (Kea inside Grasshopper) do **not** carry or transmit provider keys.
 
-- **No client secrets:** API keys remain in Azure Function App settings or Key Vault.
+- **No client secrets:** AWS credentials stay in the container environment (IAM role, env vars, or mounted credentials file).
 - **Network-scoped access:** the relay is reachable only from inside the corporate network (see *Security considerations*).
 - **Small, auditable surface:** concise codebase, Apache-2.0 licensed.
-- **Future expansion:** the relay framework can be extended (e.g., restricted **SharePoint** access for Kea’s **DefinitionLibrary**).
 
 > Project home for Kea: **https://github.com/nicolaasburgers/kea-plugin/**
 
@@ -17,10 +20,9 @@ The relay runs in your organization’s Azure tenancy and forwards requests to *
 - [Overview (Kea in Grasshopper)](#overview-kea-in-grasshopper)
 - [Endpoints](#endpoints)
 - [Feature Check & request flow (diagrams)](#feature-check--request-flow-diagrams)
-- [Configuration (App Settings)](#configuration-app-settings)
+- [Configuration](#configuration)
 - [Security considerations](#security-considerations)
-- [Deploy (Azure CLI quick start)](#deploy-azure-cli-quick-start)
-- [Typical network layout](#typical-network-layout)
+- [Deploy (Docker)](#deploy-docker)
 - [Local development](#local-development)
 - [Operations & health](#operations--health)
 - [Troubleshooting](#troubleshooting)
@@ -34,12 +36,10 @@ The relay runs in your organization’s Azure tenancy and forwards requests to *
 
 Discovery is performed by an external service called the **Feature Check API** (hosted by the Kea vendor). The Feature Check API returns a dictionary mapping **provider IDs** to one or more **relay URLs**. Each relay URL is intended to be reachable **only** from inside the company network.
 
-For **Azure OpenAI**, the client (Kea) then:
-1. Calls the relay’s **provider** and **manifest** endpoints to discover **deployment names**.
+The client (Kea) then:
+1. Calls the relay's **provider** and **manifest** endpoints to discover **deployment names**.
 2. Sends **chat completion** requests to the relay using the selected deployment name.  
-   The relay injects the API key and forwards to **Azure OpenAI** within the organization’s subscription.
-
-This repository contains the Azure Functions implementation of that **relay** for the **`azure_openai`** provider.
+   The relay resolves the deployment to a Bedrock model ID and forwards the request using server-side AWS credentials.
 
 ---
 
@@ -52,27 +52,29 @@ This repository contains the Azure Functions implementation of that **relay** fo
 - `GET /kea`
 - `GET /kea/v1`
 
+**Health:**
+- `GET /health` → `{ status: "ok" }`
+
 **JSON APIs**:
 - `GET /kea/v1/provider` → `{ providerId, name, version }`
 - `GET /kea/v1/manifest` → deployments as an **array** (friendly to .NET `DataContractJsonSerializer`):
   ```json
   {
-    "providerId": "azure_openai",
-    "name": "Exchange Relay",
+    "providerId": "aws_bedrock",
+    "name": "AWS Bedrock Relay",
     "version": "1",
     "deployments": [
-      { "displayName": "GPT-4o (EU Prod 02)", "deploymentName": "gpt4o-prod-eu-02" },
-      { "displayName": "GPT-4.1 (EU Prod 01)", "deploymentName": "gpt41-prod-eu-01" }
+      { "displayName": "Claude Sonnet 4.5 (Approved)", "deploymentName": "claude-sonnet-4-5" }
     ]
   }
   ```
-  The list is generated from the `MODEL_MAP` app setting (see below).
+  The list is generated from the model map file (see [Configuration](#configuration)).
 - `POST /kea/v1/chat` (minimal request):
   ```json
   {
-    "model": "gpt4o-prod-eu-02",     // AOAI deploymentName from manifest
-    "max_tokens": 256,
-    "messages": [ { "role": "user", "content": "Hello" } ]
+    "model": "claude-sonnet-4-5",
+    "messages": [ { "role": "user", "content": "Hello" } ],
+    "max_tokens": 256
   }
   ```
 
@@ -93,10 +95,10 @@ sequenceDiagram
 
   Note over GH: Kea derives a stable organization "domain ID"
   GH->>FC: GET /feature-check/<domain ID>
-  FC-->>GH: 200 { "azure_openai": ["https://relay.internal/...", "..."] }
+  FC-->>GH: 200 { "aws_bedrock": ["https://relay.internal/...", "..."] }
 
   GH->>RL: GET /kea/v1/provider
-  RL-->>GH: 200 { "providerId":"azure_openai", "version":"1" }
+  RL-->>GH: 200 { "providerId":"aws_bedrock", "version":"1" }
 
   GH->>RL: GET /kea/v1/manifest
   RL-->>GH: 200 { "deployments":[ {displayName, deploymentName}, ... ] }
@@ -109,151 +111,157 @@ sequenceDiagram
   autonumber
   participant GH as Kea in Grasshopper
   participant RL as Relay
-  participant AOAI as Azure OpenAI
+  participant BR as AWS Bedrock
 
-  Note over RL: App Settings: AOAI_ENDPOINT, AOAI_API_VERSION, AOAI_API_KEY, MODEL_MAP
-  GH->>RL: POST /kea/v1/chat { model:"gpt4o-prod-eu-02", messages, max_tokens }
-  RL->>AOAI: POST {endpoint}/openai/deployments/gpt4o-prod-eu-02/chat/completions?api-version=...
-  AOAI-->>RL: 200 { choices[0].message.content, usage... }
-  RL-->>GH: 200 { content, usage, requestId }
+  Note over RL: Env: AWS_REGION, IAM role or credentials, MODEL_MAP_FILE
+  GH->>RL: POST /kea/v1/chat { model:"claude-sonnet-4-5", messages, max_tokens }
+  RL->>BR: ConverseCommand { modelId, messages, inferenceConfig }
+  BR-->>RL: 200 { output.message, usage, stopReason }
+  RL-->>GH: 200 { choices[0].message.content, usage }
 ```
 
 ---
 
-## Configuration (App Settings)
+## Configuration
 
-Configure in Function App → **Configuration → Application settings**. Secrets may reference **Key Vault**.
+The relay is configured entirely via environment variables and a model map file.
 
-| Setting | Required | Example | Notes |
+| Variable | Required | Default | Notes |
 | --- | :--: | --- | --- |
-| `AOAI_ENDPOINT` | ✅ | `https://<your-aoai>.openai.azure.com` | Azure OpenAI resource endpoint |
-| `AOAI_API_VERSION` | ✅ | `2024-06-01` | Use a validated version |
-| `AOAI_API_KEY` | ✅ | *(secret)* | Key used by the relay to call AOAI |
-| `MODEL_MAP` | ✅ | `{"GPT-4o (EU Prod 02)":"gpt4o-prod-eu-02","GPT-4.1 (EU Prod 01)":"gpt41-prod-eu-01"}` | JSON mapping `displayName → deploymentName` |
-| `REQUEST_TIMEOUT_MS` | – | `60000` | Upstream timeout (ms) |
-| `RELAY_VERSION` | – | `1` | Shown in `/provider` & landing pages |
-| `AzureWebJobsDisableHomepage` | ✅ | `true` | Allows the relay to serve `/` (root) |
+| `AWS_REGION` | ✅ | — | e.g. `eu-west-1` |
+| `MODEL_MAP_FILE` | ✅* | — | Path to a JSON model map file (see format below) |
+| `MODEL_MAP` | ✅* | — | Inline JSON model map (alternative to `MODEL_MAP_FILE`) |
+| `PORT` | – | `8080` | HTTP port the server listens on |
+| `RELAY_VERSION` | – | `1` | Shown in `/kea/v1/provider` and landing pages |
+| `RELAY_NAME` | – | `AWS Bedrock Relay` | Shown in `/kea/v1/provider` |
+| `DEFAULT_MAX_TOKENS` | – | `4096` | Applied when `max_tokens` is omitted from the chat request |
+| `REQUEST_TIMEOUT_MS` | – | `60000` | Upstream Bedrock call timeout (ms) |
 
-**PowerShell (CLI) example):**
-```powershell
-$rg  = "<resource-group>"
-$app = "<function-app-name>"
+\* One of `MODEL_MAP_FILE` or `MODEL_MAP` is required.
 
-az functionapp config appsettings set -g $rg -n $app --settings '
-AOAI_ENDPOINT=https://your-aoai.openai.azure.com' '
-AOAI_API_VERSION=2024-06-01' '
-AOAI_API_KEY=<SECRET>' '
-MODEL_MAP={"GPT-4o (EU Prod 02)":"gpt4o-prod-eu-02","GPT-4.1 (EU Prod 01)":"gpt41-prod-eu-01"}' '
-REQUEST_TIMEOUT_MS=60000' '
-AzureWebJobsDisableHomepage=true'
+**AWS credentials** are resolved in the standard AWS SDK credential chain: IAM instance/task role (recommended for EC2/ECS), `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` env vars, or a mounted credentials file.
 
-az functionapp restart -g $rg -n $app
+### Model map file format
+
+See `apps/kea-relay/models.json.example` for a full example. The supported format is:
+
+```json
+{
+  "providerId": "aws_bedrock",
+  "name": "AWS Bedrock Relay",
+  "version": "1",
+  "deployments": [
+    {
+      "displayName": "Claude Sonnet 4.5 (Approved)",
+      "deploymentName": "claude-sonnet-4-5",
+      "provider": "aws_bedrock",
+      "bedrockModelId": "global.anthropic.claude-sonnet-4-5-20250929-v1:0",
+      "maxTokens": 4096
+    }
+  ]
+}
 ```
 
 ---
 
 ## Security considerations
 
-**Primary control: limit relay reachability to the company network.** Choose one of the following (or both) depending on your Azure plan and network posture:
+**Primary control: limit relay reachability to the company network.**
 
-1. **Private Endpoint (preferred)**  
-   - Create a **Private Endpoint** for the Function App and integrate with your **VNet + Private DNS**.  
-   - Internal clients resolve the relay hostname to a **private IP**. The relay is not reachable from the public Internet.  
-   - Works well with ExpressRoute/VPN and internal DNS split-horizon.
-
-2. **Access Restrictions (IP allow‑list) on the Function App**  
-   - If a Private Endpoint is not feasible, configure **Access Restrictions** to allow only the organization’s **egress IP ranges** (and block all others).  
-   - Maintain the allow‑list as corporate egress changes.
+- **Private/internal networking (preferred):** deploy the container into a private subnet or internal load balancer with no public ingress. Internal clients resolve the relay hostname to a private IP via split-horizon DNS.
+- **IP allow-list:** if full network isolation is not feasible, restrict inbound access to the relay port to the organization's egress IP ranges only.
 
 Additional recommendations:
 
-- **Server-side secrets only:** the AOAI key is stored in App Settings or via **Key Vault references**; Kea never sends or stores the key.  
-- **Least privilege:** use a dedicated AOAI resource or key scoped to required deployments; rotate keys regularly.  
-- **Transport security:** only HTTPS is exposed; avoid terminating TLS before the Function App unless a WAF/proxy is required.  
-- **Operational logging:** keep logs to **metadata and errors**; avoid emitting **request/response bodies** (prompts, completions) to logs.  
-  In Application Insights, adjust sampling and filters to prevent payload capture if custom logging is added.
+- **IAM role (preferred over static keys):** run the container on EC2 with an instance profile or ECS with a task role. No AWS key or secret needs to be passed at runtime. Scope the role to `bedrock:InvokeModel` on approved model ARNs only.
+- **Static credentials (if IAM role is unavailable):** pass `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` as secrets through your container orchestrator's secret management — never hard-code them in the image or model map file.
+- **Transport security:** terminate TLS at a load balancer or reverse proxy in front of the container; the container itself serves plain HTTP on port 8080.
+- **Operational logging:** keep logs to metadata and errors; avoid emitting request/response bodies (prompts, completions) to logs.
 
 ---
 
-## Deploy (Azure CLI quick start)
+## Deploy (Docker)
 
-From `apps/azure-openai-relay/`:
+### 1. Build the image
+
+From the repository root:
 
 ```powershell
-npm install
-npm run build
-func azure functionapp publish <function-app-name> --no-build
+docker build -t kea-relay:dev apps/kea-relay
 ```
 
-Zip deploy (explicit contents):
+### 2. Run the container
+
+**On EC2 with an IAM instance profile role** (no credentials needed):
+
 ```powershell
-$zip = "$env:TEMP\exrelay.zip"
-if (Test-Path $zip) { Remove-Item $zip -Force }
-Compress-Archive -Path ".\dist", ".\node_modules", ".\host.json", ".\package.json", ".\package-lock.json" -DestinationPath $zip
-az functionapp deployment source config-zip -g <rg> -n <app> --src $zip
+docker run -d --name kea-relay --restart unless-stopped `
+  -p 8080:8080 `
+  -e AWS_REGION=eu-west-1 `
+  -e MODEL_MAP_FILE=/config/models.json `
+  -v /opt/kea-relay/models.json:/config/models.json:ro `
+  kea-relay:dev
 ```
 
-Test:
+**With explicit AWS credentials** (e.g. local testing or environments without instance identity):
+
+```powershell
+docker run -d --name kea-relay --restart unless-stopped `
+  -p 8080:8080 `
+  -e AWS_REGION=eu-west-1 `
+  -e AWS_ACCESS_KEY_ID=$env:AWS_ACCESS_KEY_ID `
+  -e AWS_SECRET_ACCESS_KEY=$env:AWS_SECRET_ACCESS_KEY `
+  -e MODEL_MAP_FILE=/config/models.json `
+  -v "$PWD/apps/kea-relay/models.json.example:/config/models.json:ro" `
+  kea-relay:dev
 ```
-GET  https://<app>.azurewebsites.net/
-GET  https://<app>.azurewebsites.net/kea/v1/manifest
-POST https://<app>.azurewebsites.net/kea/v1/chat
+
+### 3. Verify
+
 ```
+GET  http://<host>:8080/health
+GET  http://<host>:8080/kea/v1/manifest
+POST http://<host>:8080/kea/v1/chat
+```
+
+### Azure deployment (same image)
+
+The same image runs in Azure Container Apps (internal environment), App Service for Containers, or a VM with Docker. Keep ingress internal and supply the model config via a mounted file or `MODEL_MAP` env var.
 
 ---
 
 ## Local development
 
-Requirements: Node 18 or later, Azure Functions Core Tools v4, **Azurite** (or a real Storage account).
+Requirements: Node 20, AWS credentials available in the shell.
 
-`local.settings.json`:
-```json
-{
-  "IsEncrypted": false,
-  "Values": {
-    "FUNCTIONS_WORKER_RUNTIME": "node",
-    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
-    "AzureWebJobsDisableHomepage": "true",
-
-    "AOAI_ENDPOINT": "https://your-aoai.openai.azure.com",
-    "AOAI_API_VERSION": "2024-06-01",
-    "AOAI_API_KEY": "YOUR-KEY",
-    "MODEL_MAP": "{\"GPT-4o (EU Prod 02)\":\"gpt4o-prod-eu-02\"}",
-    "REQUEST_TIMEOUT_MS": "60000",
-    "RELAY_VERSION": "1"
-  }
-}
-```
-
-Run:
-```bash
-# Start Azurite in another terminal (or Docker)
-npx azurite --location .azurite
-
+```powershell
+cd apps/kea-relay
+npm install
 npm run build
-func start
+
+$env:AWS_REGION     = "eu-west-1"
+$env:MODEL_MAP_FILE = "./models.json.example"
+npm start
 ```
 
 ---
 
 ## Operations & health
 
+- **Health:** `GET /health` → `{ status: "ok" }`
 - **Landing pages:** `/`, `/kea`, `/kea/v1` return a small HTML page (200) with non-sensitive status hints.
 - **Provider info:** `GET /kea/v1/provider`
-- **Manifest:** `GET /kea/v1/manifest` (driven by `MODEL_MAP`)
-- **Logs:**  
-  - Tail: `az webapp log tail -g <rg> -n <app>`  
-  - App Insights: observe rates, latency, exceptions.
+- **Manifest:** `GET /kea/v1/manifest` (driven by the model map file)
+- **Logs:** the relay logs request metadata and errors to stdout; collect with your container runtime's log driver.
 
 ---
 
 ## Troubleshooting
 
-- **`MODEL_MAP` parse error:** ensure the entire `KEY=VALUE` is passed as **one argument** to the CLI (single‑quote the whole pair or use a variable).  
-- **Root `/` shows Functions splash page:** set `AzureWebJobsDisableHomepage=true` and restart the app.  
-- **Routes include `/api`:** confirm `host.json` has `"routePrefix": ""` and redeploy.  
-- **204 on root:** add `HEAD` to the allowed methods for the HTML endpoints.  
-- **Build deployed without functions:** ensure `dist/index.js` imports `./functions/*.js`, and that `.funcignore` does **not** exclude `dist/` or `node_modules/` when using `--no-build`/zip deploy.
+- **Model map parse error:** check that `MODEL_MAP_FILE` points to a valid JSON file and that the file is mounted correctly into the container.
+- **`NoCredentialProviders` / auth error from Bedrock:** verify `AWS_REGION` is set and AWS credentials are available (instance role, task role, or explicit env vars).
+- **`ResourceNotFoundException` from Bedrock:** the `bedrockModelId` in the model map does not exist in the configured region, or the model requires an inference profile ARN.
+- **404 on all routes:** confirm the container started successfully (`docker logs kea-relay`) and that `PORT` matches the published port.
 
 ---
 
